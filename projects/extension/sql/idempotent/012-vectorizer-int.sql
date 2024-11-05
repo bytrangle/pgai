@@ -805,3 +805,60 @@ $func$
 language plpgsql volatile security invoker
 set search_path to pg_catalog, pg_temp
 ;
+
+-------------------------------------------------------------------------------
+-- _vectorizer_handle_drops
+create or replace function ai._vectorizer_handle_drops()
+returns event_trigger as
+$func$
+declare
+    _vectorizer_id int;
+begin
+    for _vectorizer_id in
+    (
+        select distinct v.id
+        from pg_catalog.pg_event_trigger_dropped_objects() d
+        inner join ai.vectorizer v
+        on ((d.schema_name, d.object_name) in
+            ( (v.source_schema, v.source_table)
+            , (v.target_schema, v.target_table)
+            , (v.queue_schema, v.queue_table)
+            )
+        )
+        where pg_catalog.lower(d.object_type) operator(pg_catalog.=) 'table'
+    )
+    loop
+        -- this may cause recursive invocations of this event trigger
+        -- however it does not cause a problem
+        raise notice 'associated table for vectorizer % dropped. dropping vectorizer', _vectorizer_id;
+        perform ai.drop_vectorizer(_vectorizer_id);
+    end loop;
+end;
+$func$
+language plpgsql volatile security definer
+set search_path to pg_catalog, pg_temp
+;
+
+-- install the event trigger if not exists
+do language plpgsql $block$
+declare
+    _found bool;
+begin
+    -- if the event trigger already exists, noop
+    select true into _found
+    from pg_catalog.pg_event_trigger g
+    inner join pg_catalog.pg_proc p on (g.evtfoid operator(pg_catalog.=) p.oid)
+    inner join pg_catalog.pg_namespace n on (p.pronamespace operator(pg_catalog.=) n.oid)
+    where g.evtname operator(pg_catalog.=) '_vectorizer_handle_drops'
+    and p.proname operator(pg_catalog.=) '_vectorizer_handle_drops'
+    and n.nspname operator(pg_catalog.=) 'ai'
+    ;
+    if found then
+        return;
+    end if;
+
+    create event trigger _vectorizer_handle_drops
+    on sql_drop
+    execute function ai._vectorizer_handle_drops();
+end
+$block$;
