@@ -123,7 +123,7 @@ begin
     , %s
     , chunk_seq int not null
     , chunk text not null
-    , embedding @extschema:vector@.vector(%L) not null
+    , embedding @extschema:vector@.vector(%L)%s not null
     , unique (%s, chunk_seq)
     , foreign key (%s) references %I.%I (%s) on delete cascade
     )
@@ -144,6 +144,7 @@ begin
             x(attnum int, attname name, typname name)
       )
     , dimensions
+    , case when dimensions <= 2000 then ' storage plain' else '' end
     , _pk_cols
     , _pk_cols
     , source_schema, source_table

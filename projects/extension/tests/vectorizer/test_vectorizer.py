@@ -117,7 +117,7 @@ TARGET_TABLE = """
  published      | timestamp with time zone |           | not null |                   | plain    |             |              | 
  chunk_seq      | integer                  |           | not null |                   | plain    |             |              | 
  chunk          | text                     |           | not null |                   | extended |             |              | 
- embedding      | vector(768)              |           | not null |                   | external |             |              | 
+ embedding      | vector(768)              |           | not null |                   | plain    |             |              | 
 Indexes:
     "blog_embedding_store_pkey" PRIMARY KEY, btree (embedding_uuid)
     "blog_embedding_store_title_published_chunk_seq_key" UNIQUE CONSTRAINT, btree (title, published, chunk_seq)
@@ -462,6 +462,65 @@ def test_vectorizer_timescaledb():
     # does the view look right?
     actual = psql_cmd(r"\d+ website.blog_embedding")
     assert actual == VIEW
+
+
+def test_large_dimensions():
+    with psycopg.connect(
+        db_url("test"), autocommit=True, row_factory=namedtuple_row
+    ) as con:
+        with con.cursor() as cur:
+            cur.execute("create extension if not exists ai cascade")
+            cur.execute("create extension if not exists timescaledb")
+            cur.execute("drop table if exists bigun")
+            cur.execute("""
+                create table bigun
+                ( id serial not null primary key
+                , title text not null
+                , published timestamptz
+                , category text
+                , tags text[]
+                , content text not null
+                )
+            """)
+            cur.execute("""
+                insert into bigun(title, published, category, tags, content)
+                values
+                  ( 'this is my title'
+                  , '2024-01-06'::timestamptz
+                  , 'tongue twisters'
+                  , array['silly']
+                  , 'if two witches watch two watches, which witch watches which watch'
+                  )
+            """)
+
+            # create a vectorizer for the blog table
+            # language=PostgreSQL
+            cur.execute("""
+            select ai.create_vectorizer
+            ( 'bigun'::regclass
+            , embedding=>ai.embedding_openai('text-embedding-3-small', 2001) -- "large" dimensions
+            , chunking=>ai.chunking_character_text_splitter('content', 128, 10)
+            , scheduling=>ai.scheduling_none()
+            , indexing=>ai.indexing_none()
+            , grant_to=>null
+            );
+            """)
+            vectorizer_id = cur.fetchone()[0]
+
+            cur.execute("select * from ai.vectorizer where id = %s", (vectorizer_id,))
+            vectorizer = cur.fetchone()
+
+            # the embedding column should have external storage (not plain)
+            cur.execute(f"""
+                select a.attstorage
+                from pg_class k
+                inner join pg_namespace n on (k.relnamespace = n.oid)
+                inner join pg_attribute a on (k.oid = a.attrelid and a.attname = 'embedding')
+                where k.relname = '{vectorizer.target_table}'
+                and n.nspname = '{vectorizer.target_schema}'
+            """)
+            actual = cur.fetchone()[0]
+            assert actual == "e"
 
 
 def test_drop_vectorizer():
